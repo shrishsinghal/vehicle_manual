@@ -53,11 +53,18 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         model: 'llama-3.1-8b-instant',
         messages: [
-          { role: 'system', content: 'You are a Boson Motors customer care support. Use provided context to answer. Always cite [Page X].' },
+          { role: 'system', 
+            content: 'You are the Boson Motors Technical Assistant. \
+            Use the provided manual context to answer clearly. Use Markdown for formatting: \
+            - Use bullet points for steps or lists. \
+            - Use bold for technical terms. \
+            - Separate paragraphs with double newlines. \
+            Always cite the [Page X] at the end of relevant sentences.' },
           { role: 'user', content: `Context:\n${context}\n\nQuestion: ${question}` }
         ]
       })
     });
+
 
     const groqData = await groqResponse.json();
 
