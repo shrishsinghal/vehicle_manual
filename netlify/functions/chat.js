@@ -2,7 +2,6 @@
 
 const manualData = require('./manual_data.json');
 
-// Cosine similarity
 function cosineSimilarity(a, b) {
   let dotProduct = 0;
   let normA = 0;
@@ -17,34 +16,49 @@ function cosineSimilarity(a, b) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// Get query embedding from HuggingFace (FREE!)
+// FIXED: Using new HuggingFace router endpoint
 async function getQueryEmbedding(query) {
-  const HF_API_KEY = process.env.HF_API_KEY || 'hf_'; // Optional, works without
+  const HF_TOKEN = process.env.HF_API_KEY;
+  
+  if (!HF_TOKEN) {
+    throw new Error('HF_API_KEY not set');
+  }
   
   const response = await fetch(
-    'https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2',
+    'https://router.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2',
     {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${HF_API_KEY}`,
+        'Authorization': `Bearer ${HF_TOKEN}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         inputs: query,
-        options: { wait_for_model: true }
+        options: {
+          wait_for_model: true
+        }
       })
     }
   );
   
+  console.log('HF Status:', response.status);
+  
   if (!response.ok) {
-    throw new Error(`HF API error: ${response.status}`);
+    const errorText = await response.text();
+    console.error('HF Error:', errorText);
+    throw new Error(`HF API error: ${response.status} - ${errorText}`);
   }
   
-  const embedding = await response.json();
+  const result = await response.json();
+  
+  // HF returns embedding directly or in array
+  const embedding = Array.isArray(result) ? result[0] : result;
+  
+  console.log('✅ Got embedding, length:', embedding.length);
+  
   return embedding;
 }
 
-// Vector search
 async function vectorSearch(query, topK = 3) {
   console.log('🔍 Getting query embedding...');
   const queryEmbedding = await getQueryEmbedding(query);
@@ -88,11 +102,22 @@ exports.handler = async (event) => {
     // Vector search
     const chunks = await vectorSearch(question, 3);
     
+    if (chunks.length === 0) {
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          answer: "I couldn't find relevant information in the manual. Try rephrasing your question.",
+          sources: []
+        })
+      };
+    }
+    
     // Build context
     const context = chunks
       .map(c => `[Page ${c.page}]\n${c.text}`)
       .join('\n\n---\n\n')
-      .substring(0, 4000);  // Keep it reasonable
+      .substring(0, 4000);
     
     console.log('📝 Context length:', context.length);
     
@@ -143,6 +168,7 @@ exports.handler = async (event) => {
     
   } catch (error) {
     console.error('💥 ERROR:', error.message);
+    console.error('Stack:', error.stack);
     
     return {
       statusCode: 500,
