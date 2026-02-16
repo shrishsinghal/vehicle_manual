@@ -1,33 +1,69 @@
 // netlify/functions/chat.js
 
-let manualData;
-try {
-  manualData = require('./manual_data.json');
-  console.log('✅ Loaded', manualData.chunks?.length, 'chunks');
-} catch (e) {
-  console.error('❌ Failed to load data:', e.message);
+const manualData = require('./manual_data.json');
+
+// Cosine similarity
+function cosineSimilarity(a, b) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-function searchChunks(query, topK = 3) {
-  if (!manualData?.chunks) return [];
+// Get query embedding from HuggingFace (FREE!)
+async function getQueryEmbedding(query) {
+  const HF_API_KEY = process.env.HF_API_KEY || 'hf_'; // Optional, works without
   
-  const queryLower = query.toLowerCase();
-  const queryWords = queryLower.split(/\s+/).filter(w => w.length > 3);
+  const response = await fetch(
+    'https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${HF_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        inputs: query,
+        options: { wait_for_model: true }
+      })
+    }
+  );
   
-  const scored = manualData.chunks.map(chunk => {
-    const text = chunk.text.toLowerCase();
-    let score = 0;
-    
-    queryWords.forEach(word => {
-      const matches = (text.match(new RegExp(word, 'g')) || []).length;
-      score += matches;
-    });
-    
-    return { ...chunk, score };
-  });
+  if (!response.ok) {
+    throw new Error(`HF API error: ${response.status}`);
+  }
+  
+  const embedding = await response.json();
+  return embedding;
+}
+
+// Vector search
+async function vectorSearch(query, topK = 3) {
+  console.log('🔍 Getting query embedding...');
+  const queryEmbedding = await getQueryEmbedding(query);
+  
+  console.log('📊 Computing similarities...');
+  const scored = manualData.chunks.map(chunk => ({
+    ...chunk,
+    score: cosineSimilarity(queryEmbedding, chunk.embedding)
+  }));
   
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, topK).filter(c => c.score > 0);
+  
+  const results = scored.slice(0, topK);
+  console.log('✅ Top results:', results.map(r => ({ 
+    page: r.page, 
+    score: r.score.toFixed(3) 
+  })));
+  
+  return results;
 }
 
 exports.handler = async (event) => {
@@ -43,44 +79,24 @@ exports.handler = async (event) => {
   
   try {
     const { question } = JSON.parse(event.body);
-    console.log('Question:', question);
+    console.log('❓ Question:', question);
     
     if (!question) {
       throw new Error('No question provided');
     }
     
-    if (!manualData) {
-      throw new Error('Manual data not loaded');
-    }
+    // Vector search
+    const chunks = await vectorSearch(question, 3);
     
-    if (!process.env.GROQ_API_KEY) {
-      throw new Error('GROQ_API_KEY not set');
-    }
-    
-    // Search
-    const chunks = searchChunks(question, 3);
-    console.log('Found chunks:', chunks.length);
-    
-    if (chunks.length === 0) {
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          answer: "I couldn't find relevant information. Try rephrasing your question.",
-          sources: []
-        })
-      };
-    }
-    
-    // Build context (LIMIT LENGTH!)
+    // Build context
     const context = chunks
-      .map(c => `[Page ${c.page}] ${c.text.substring(0, 500)}`)  // Limit each chunk
-      .join('\n\n')
-      .substring(0, 3000);  // Max 3000 chars total
+      .map(c => `[Page ${c.page}]\n${c.text}`)
+      .join('\n\n---\n\n')
+      .substring(0, 4000);  // Keep it reasonable
     
-    console.log('Context length:', context.length);
+    console.log('📝 Context length:', context.length);
     
-    // Call Groq with SMALLER model and SHORTER context
+    // Call Groq
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -88,28 +104,26 @@ exports.handler = async (event) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',  // Smaller, faster model
+        model: 'llama-3.1-8b-instant',
         messages: [
           {
             role: 'system',
-            content: 'Answer based on the manual context. Cite page numbers. Be concise.'
+            content: 'You are a helpful Boson Motors vehicle assistant. Answer questions based ONLY on the provided manual excerpts. Always cite page numbers. Be concise and helpful.'
           },
           {
             role: 'user',
-            content: `Context:\n${context}\n\nQ: ${question}`
+            content: `Manual context:\n${context}\n\nQuestion: ${question}`
           }
         ],
         temperature: 0.3,
-        max_tokens: 300  // Shorter response
+        max_tokens: 400
       })
     });
     
-    console.log('Groq status:', groqResponse.status);
-    
     if (!groqResponse.ok) {
       const errorBody = await groqResponse.text();
-      console.error('Groq error body:', errorBody);
-      throw new Error(`Groq returned ${groqResponse.status}: ${errorBody}`);
+      console.error('Groq error:', errorBody);
+      throw new Error(`Groq error: ${groqResponse.status}`);
     }
     
     const groqData = await groqResponse.json();
@@ -120,13 +134,15 @@ exports.handler = async (event) => {
       headers,
       body: JSON.stringify({
         answer,
-        sources: chunks.map(c => ({ page: c.page, score: c.score }))
+        sources: chunks.map(c => ({ 
+          page: c.page, 
+          score: parseFloat(c.score.toFixed(3))
+        }))
       })
     };
     
   } catch (error) {
-    console.error('ERROR:', error.message);
-    console.error('Stack:', error.stack);
+    console.error('💥 ERROR:', error.message);
     
     return {
       statusCode: 500,
