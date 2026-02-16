@@ -1,182 +1,76 @@
 // netlify/functions/chat.js
-
 const manualData = require('./manual_data.json');
 
 function cosineSimilarity(a, b) {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-  
+  if (!a || !b || a.length !== b.length) return 0;
+  let dotProduct = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
     dotProduct += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
   }
-  
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// FIXED: Using new HuggingFace router endpoint
-async function getQueryEmbedding(query) {
-  const HF_TOKEN = process.env.HF_API_KEY;
-  
-  if (!HF_TOKEN) {
-    throw new Error('HF_API_KEY not set');
-  }
-  
-  const response = await fetch(
-    'https://router.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${HF_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        inputs: query,
-        options: {
-          wait_for_model: true
-        }
-      })
-    }
-  );
-  
-  console.log('HF Status:', response.status);
-  
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('HF Error:', errorText);
-    throw new Error(`HF API error: ${response.status} - ${errorText}`);
-  }
-  
-  const result = await response.json();
-  
-  // HF returns embedding directly or in array
-  const embedding = Array.isArray(result) ? result[0] : result;
-  
-  console.log('✅ Got embedding, length:', embedding.length);
-  
-  return embedding;
-}
-
-async function vectorSearch(query, topK = 3) {
-  console.log('🔍 Getting query embedding...');
-  const queryEmbedding = await getQueryEmbedding(query);
-  
-  console.log('📊 Computing similarities...');
-  const scored = manualData.chunks.map(chunk => ({
-    ...chunk,
-    score: cosineSimilarity(queryEmbedding, chunk.embedding)
-  }));
-  
-  scored.sort((a, b) => b.score - a.score);
-  
-  const results = scored.slice(0, topK);
-  console.log('✅ Top results:', results.map(r => ({ 
-    page: r.page, 
-    score: r.score.toFixed(3) 
-  })));
-  
-  return results;
-}
-
 exports.handler = async (event) => {
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json'
-  };
-  
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers, body: '' };
-  }
+  const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
   
   try {
     const { question } = JSON.parse(event.body);
-    console.log('❓ Question:', question);
-    
-    if (!question) {
-      throw new Error('No question provided');
+
+    // --- STEP 1: HUGGING FACE (384D EMBEDDING) ---
+    const hfResponse = await fetch(
+      'https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2/pipeline/feature-extraction',
+      {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${process.env.HF_API_KEY}`, 
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({ inputs: [question] })
+      }
+    );
+
+    const hfData = await hfResponse.json();
+    // HF returns [[...]] for batched inputs
+    const queryEmbedding = Array.isArray(hfData[0]) ? hfData[0] : hfData;
+
+    if (!queryEmbedding || queryEmbedding.length !== 384) {
+      throw new Error("Invalid embedding returned from HF");
     }
+
+    // --- STEP 2: VECTOR SEARCH ---
+    const chunks = manualData.chunks.map(chunk => ({
+      ...chunk,
+      score: cosineSimilarity(queryEmbedding, chunk.embedding)
+    })).sort((a, b) => b.score - a.score).slice(0, 3);
     
-    // Vector search
-    const chunks = await vectorSearch(question, 3);
-    
-    if (chunks.length === 0) {
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({
-          answer: "I couldn't find relevant information in the manual. Try rephrasing your question.",
-          sources: []
-        })
-      };
-    }
-    
-    // Build context
-    const context = chunks
-      .map(c => `[Page ${c.page}]\n${c.text}`)
-      .join('\n\n---\n\n')
-      .substring(0, 4000);
-    
-    console.log('📝 Context length:', context.length);
-    
-    // Call Groq
+    // --- STEP 3: GROQ CHAT ---
+    const context = chunks.map(c => `[Page ${c.page}] ${c.text}`).join('\n\n');
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'llama-3.1-8b-instant',
         messages: [
-          {
-            role: 'system',
-            content: 'You are a helpful Boson Motors vehicle assistant. Answer questions based ONLY on the provided manual excerpts. Always cite page numbers. Be concise and helpful.'
-          },
-          {
-            role: 'user',
-            content: `Manual context:\n${context}\n\nQuestion: ${question}`
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 400
+          { role: 'system', content: 'You are a Boson Motors customer care support. Use provided context to answer. Always cite [Page X].' },
+          { role: 'user', content: `Context:\n${context}\n\nQuestion: ${question}` }
+        ]
       })
     });
-    
-    if (!groqResponse.ok) {
-      const errorBody = await groqResponse.text();
-      console.error('Groq error:', errorBody);
-      throw new Error(`Groq error: ${groqResponse.status}`);
-    }
-    
+
     const groqData = await groqResponse.json();
-    const answer = groqData.choices[0].message.content;
-    
+
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        answer,
-        sources: chunks.map(c => ({ 
-          page: c.page, 
-          score: parseFloat(c.score.toFixed(3))
-        }))
+        answer: groqData.choices[0].message.content,
+        sources: chunks.map(c => ({ page: c.page }))
       })
     };
-    
+
   } catch (error) {
-    console.error('💥 ERROR:', error.message);
-    console.error('Stack:', error.stack);
-    
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: error.message,
-        answer: `Sorry, something went wrong: ${error.message}`
-      })
-    };
+    return { statusCode: 500, headers, body: JSON.stringify({ error: error.message }) };
   }
 };
