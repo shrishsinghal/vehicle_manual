@@ -40,15 +40,44 @@ function cosineSimilarity(a, b) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// Function to get VIN from nickname (case insensitive)
-function getVIN(nickname) {
-  const lowerNickname = nickname.toLowerCase().trim();
-  return vehicleMapping[lowerNickname] || null;
-}
+// Function to find the best matching path name from available paths
+async function findMatchingPath(requestedPath, availablePathNames) {
+  if (!requestedPath) return null;
+  
+  try {
+    const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', 
+            content: `You are a path matcher. Given a user-requested path and a list of available paths, find the best match.
+Available paths: ${JSON.stringify(availablePathNames)}
 
-// Function to normalize path name (remove spaces, capitalize)
-function normalizePathName(name) {
-  return name.replace(/\s+/g, '').replace(/^\w/, c => c.toUpperCase());
+Return ONLY a JSON object: {"matched_path": "path_name_or_null", "confidence": "high|medium|low"}
+
+Rules:
+- Match case-insensitively and handle variations (e.g., "jay gps 3" matches "JayGPS3")
+- Handle abbreviations and typos intelligently
+- If multiple matches are possible, pick the most likely one
+- If no reasonable match, return null for matched_path
+
+Return ONLY JSON, no markdown.` },
+          { role: 'user', content: `Find path matching: "${requestedPath}"` }
+        ]
+      })
+    });
+
+    const groqData = await groqResponse.json();
+    const content = groqData.choices[0].message.content.trim();
+    const jsonStr = content.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/```$/, '').trim();
+    const result = JSON.parse(jsonStr);
+    return result.matched_path;
+  } catch (error) {
+    console.error('Path matching error:', error);
+    return null;
+  }
 }
 
 // Function to extract path name from filename
@@ -95,7 +124,7 @@ async function stopPatrol(vin) {
   return await response.json();
 }
 
-// Function to parse command using LLM
+// Function to parse command using LLM - comprehensive and robust
 async function parseCommandWithLLM(question) {
   try {
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -105,7 +134,31 @@ async function parseCommandWithLLM(question) {
         model: 'llama-3.1-8b-instant',
         messages: [
           { role: 'system', 
-            content: 'You are a command parser for vehicle control. Analyze the user query and determine if it is a command to list mission files, start a patrol path, or stop patrol. Commands include: list/show mission files, saved paths, available paths; start patrol/path on vehicle; stop patrol on vehicle. If it is a command, extract: intent ("list", "start", "stop"), vehicle nickname (like p12, p15, black dragon), path name (for start, like JayGPS2). If not a command or unclear, set intent to "null". Return only valid JSON: {"intent": "list|start|stop|null", "vehicle": "nickname or null", "path": "path name or null"}' },
+            content: `You are a command parser for vehicle control. Return ONLY a JSON object, nothing else.
+
+KNOWN VEHICLES (map any variation to the standard key):
+${Object.entries(vehicleMapping).map(([key, vin]) => `  - "${key}" (VIN: ${vin})`).join('\n')}
+
+TASK: Extract intent and parameters from user query.
+- intent: "list" (list mission files), "start" (start patrol), "stop" (stop patrol), or "null" (not a command)
+- vehicle: the vehicle nickname as key from the known vehicles list (standardized, e.g., "p12", "p15", "black dragon")
+- path: extracted path name for start commands (e.g., "JayGPS3", match to available paths case-insensitively)
+
+RULES:
+1. Match vehicle nicknames intelligently (e.g., "p12 vehicle", "P12", "p-12" all map to "p12")
+2. For path names, extract just the name without file extensions or timestamps
+3. If vehicle or path cannot be matched, return null for that field
+4. Only return "start" intent if both vehicle AND path are provided
+
+EXAMPLES:
+- "list saved paths for p15" -> {"intent": "list", "vehicle": "p15", "path": null}
+- "show mission files on P15 VEHICLE" -> {"intent": "list", "vehicle": "p15", "path": null}
+- "start jaygps3 on p15" -> {"intent": "start", "vehicle": "p15", "path": "JayGPS3"}
+- "start JayGPS 3 on p-15 vehicle" -> {"intent": "start", "vehicle": "p15", "path": "JayGPS3"}
+- "stop patrol on black dragon" -> {"intent": "stop", "vehicle": "black dragon", "path": null}
+- "how to start the vehicle" -> {"intent": null, "vehicle": null, "path": null}
+
+RETURN ONLY VALID JSON, NO MARKDOWN, NO EXTRA TEXT.` },
           { role: 'user', content: question }
         ]
       })
@@ -114,8 +167,9 @@ async function parseCommandWithLLM(question) {
     const groqData = await groqResponse.json();
     const content = groqData.choices[0].message.content.trim();
     // Remove any markdown code blocks if present
-    const jsonStr = content.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    const jsonStr = content.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/```$/, '').trim();
     const result = JSON.parse(jsonStr);
+    console.log('Parsed command:', { question, result });
     return result;
   } catch (error) {
     console.error('LLM parsing error:', error);
@@ -123,12 +177,12 @@ async function parseCommandWithLLM(question) {
   }
 }
 
-// Function to parse command from question (fallback or simple check)
+// Simple check: is this likely a command at all?
 function isCommand(question) {
   const lower = question.toLowerCase();
-  return lower.includes('list') && (lower.includes('mission') || lower.includes('path')) ||
-         lower.includes('start') && lower.includes('patrol') ||
-         lower.includes('stop') && lower.includes('patrol');
+  return lower.includes('list') || lower.includes('show') || 
+         lower.includes('start') || lower.includes('stop') || 
+         lower.includes('mission') || lower.includes('path');
 }
 
 exports.handler = async (event) => {
@@ -143,14 +197,15 @@ exports.handler = async (event) => {
       if (!command || command.intent === 'null' || command.intent === null) {
         // Not a valid command, fall through to manual
       } else {
-        // Handle command
-        const vin = getVIN(command.vehicle);
+        // Handle command - vehicle is already extracted by LLM
+        const vin = command.vehicle ? vehicleMapping[command.vehicle.toLowerCase()] : null;
+        
         if (!vin) {
           return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
-              answer: `Sorry, I don't recognize the vehicle "${command.vehicle}". Please use a valid nickname like p12, black dragon, etc.`,
+              answer: `Sorry, I don't recognize the vehicle "${command.vehicle}". Known vehicles: ${Object.keys(vehicleMapping).join(', ')}`,
               sources: []
             })
           };
@@ -176,10 +231,23 @@ exports.handler = async (event) => {
             };
           }
         } else if (command.intent === 'start') {
+          if (!command.path) {
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `Please specify which path to start. Available paths can be listed with "list mission files for ${command.vehicle}".`,
+                sources: []
+              })
+            };
+          }
+          
           try {
             const { filenames, pathNames } = await getMissionFiles(vin);
-            const index = pathNames.findIndex(name => name.toLowerCase() === command.path.toLowerCase());
-            if (index === -1) {
+            // Use LLM to find the best match
+            const matchedPath = await findMatchingPath(command.path, pathNames);
+            
+            if (!matchedPath) {
               return {
                 statusCode: 200,
                 headers,
@@ -189,12 +257,16 @@ exports.handler = async (event) => {
                 })
               };
             }
-            await startPatrol(vin, filenames[index]);
+            
+            const pathIndex = pathNames.indexOf(matchedPath);
+            const filename = filenames[pathIndex];
+            
+            await startPatrol(vin, filename);
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `Patrol started successfully for ${command.path} on ${command.vehicle} (${vin}).`,
+                answer: `Patrol started successfully for ${matchedPath} on ${command.vehicle} (${vin}).`,
                 sources: []
               })
             };
