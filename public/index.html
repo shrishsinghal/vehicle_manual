@@ -15,6 +15,7 @@
         <div id="chatArea" class="chat-area"></div>
         <div class="input-area">
             <input type="text" id="userInput" placeholder="Ask about the vehicle...">
+            <button id="voiceBtn" title="Voice Input">🎤</button>
             <button id="sendBtn">SEND</button>
         </div>
     </div>
@@ -71,6 +72,77 @@
         sendBtn.addEventListener('click', handleSend);
         userInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleSend();
+        });
+
+        // Voice Recognition Setup
+        const voiceBtn = document.getElementById('voiceBtn');
+        let recognition = null;
+        let isListening = false;
+
+        // Check if browser supports speech recognition
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            
+            recognition.continuous = false;
+            recognition.interimResults = false;
+            recognition.lang = 'en-US';
+            
+            recognition.onstart = () => {
+                isListening = true;
+                voiceBtn.textContent = '🎙️';
+                voiceBtn.style.background = '#ff4444';
+                userInput.placeholder = 'Listening...';
+            };
+            
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                userInput.value = transcript;
+                userInput.focus();
+            };
+            
+            recognition.onend = () => {
+                isListening = false;
+                voiceBtn.textContent = '🎤';
+                voiceBtn.style.background = '';
+                userInput.placeholder = 'Ask about the vehicle...';
+            };
+            
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                isListening = false;
+                voiceBtn.textContent = '🎤';
+                voiceBtn.style.background = '';
+                userInput.placeholder = 'Ask about the vehicle...';
+                
+                if (event.error === 'not-allowed') {
+                    alert('Microphone access denied. Please allow microphone access and try again.');
+                } else {
+                    alert('Speech recognition error. Please try again.');
+                }
+            };
+        } else {
+            // Browser doesn't support speech recognition
+            voiceBtn.style.display = 'none';
+        }
+
+        // Voice button click handler
+        voiceBtn.addEventListener('click', () => {
+            if (!recognition) {
+                alert('Speech recognition is not supported in this browser.');
+                return;
+            }
+            
+            if (isListening) {
+                recognition.stop();
+            } else {
+                try {
+                    recognition.start();
+                } catch (error) {
+                    console.error('Error starting recognition:', error);
+                    alert('Error starting voice recognition. Please try again.');
+                }
+            }
         });
     </script>
 </body>

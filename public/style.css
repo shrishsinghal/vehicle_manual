@@ -96,6 +96,70 @@ body {
     background: var(--boson-red);
 }
 
+.input-area {
+    display: flex;
+    gap: 12px;
+    padding: 24px 32px;
+    background: #ffffff;
+    border-top: 1px solid #f0f0f0;
+    align-items: center;
+}
+
+.input-area input {
+    flex: 1;
+    padding: 16px 20px;
+    border: 2px solid #e0e0e0;
+    border-radius: 12px;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.3s ease;
+}
+
+.input-area input:focus {
+    border-color: var(--boson-red);
+    box-shadow: 0 0 0 3px rgba(227, 24, 55, 0.1);
+}
+
+.input-area input::placeholder {
+    color: #999;
+}
+
+.input-area button {
+    padding: 16px 20px;
+    background: var(--boson-red);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    white-space: nowrap;
+}
+
+.input-area #voiceBtn {
+    background: #f8f9fa;
+    color: #666;
+    border: 2px solid #e0e0e0;
+    padding: 16px;
+    font-size: 1.2rem;
+    min-width: 60px;
+}
+
+.input-area #voiceBtn:hover {
+    background: #e9ecef;
+    border-color: #ccc;
+}
+
+.input-area #voiceBtn:active {
+    background: #ff4444;
+    color: white;
+}
+
+.input-area #sendBtn {
+    background: linear-gradient(135deg, var(--boson-red) 0%, var(--boson-red-dark) 100%);
+    min-width: 80px;
+}
+
 .message {
     max-width: 75%;
     padding: 16px 20px;
@@ -292,10 +356,23 @@ button:disabled {
     
     .input-area {
         padding: 16px;
+        gap: 8px;
     }
     
-    button {
-        padding: 14px 20px;
-        font-size: 0.85rem;
+    .input-area input {
+        padding: 14px 16px;
+        font-size: 0.9rem;
+    }
+    
+    .input-area button {
+        padding: 14px 16px;
+        font-size: 0.8rem;
+        min-width: auto;
+    }
+    
+    .input-area #voiceBtn {
+        padding: 14px;
+        min-width: 50px;
+        font-size: 1rem;
     }
 }
