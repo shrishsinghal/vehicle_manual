@@ -62,8 +62,12 @@ async function getMissionFiles(vin) {
   const response = await fetch(`https://botcontrol.bosonmotors.com/api/getmissionFiles/${vin}`);
   if (!response.ok) throw new Error(`Failed to fetch mission files: ${response.status}`);
   const data = await response.json();
-  // Parse the data string which contains PosixPath objects
-  const paths = JSON.parse(data.data);
+  // data.data is a string like: "[PosixPath('/path/file1.json'), PosixPath('/path/file2.json')]"
+  const dataStr = data.data;
+  // Extract paths using regex
+  const pathMatches = dataStr.match(/PosixPath\('([^']+)'\)/g);
+  if (!pathMatches) throw new Error('Invalid mission files format');
+  const paths = pathMatches.map(match => match.match(/PosixPath\('([^']+)'\)/)[1]);
   const filenames = paths.map(p => p.split('/').pop());
   const pathNames = filenames.map(extractPathName);
   return { filenames, pathNames };
