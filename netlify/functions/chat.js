@@ -91,39 +91,33 @@ async function stopPatrol(vin) {
   return await response.json();
 }
 
-// Function to parse command from question
-function parseCommand(question) {
+// Function to parse command using LLM
+async function parseCommandWithLLM(question) {
+  const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', 
+          content: 'You are a command parser for vehicle control. Extract the intent and parameters from the user query. Intents: list (list mission files), start (start patrol), stop (stop patrol). Parameters: vehicle (nickname), path (for start). Return JSON: {"intent": "list|start|stop", "vehicle": "nickname", "path": "path name"} or null if not a command.' },
+        { role: 'user', content: question }
+      ],
+      response_format: { type: "json_object" }
+    })
+  });
+
+  const groqData = await groqResponse.json();
+  const result = JSON.parse(groqData.choices[0].message.content);
+  return result.intent ? result : null;
+}
+
+// Function to parse command from question (fallback or simple check)
+function isCommand(question) {
   const lower = question.toLowerCase();
-  
-  // List mission files
-  if (lower.includes('list') && (lower.includes('mission') || lower.includes('path'))) {
-    const vehicleMatch = question.match(/(?:for|on)\s+(\w+(?:\s+\w+)*)/i);
-    if (vehicleMatch) {
-      const vehicle = vehicleMatch[1].toLowerCase().trim();
-      return { type: 'list', vehicle };
-    }
-  }
-  
-  // Start patrol
-  if (lower.includes('start')) {
-    const match = question.match(/start\s+(.+?)\s+(?:on|for)\s+(\w+(?:\s+\w+)*)/i);
-    if (match) {
-      const pathName = normalizePathName(match[1].trim());
-      const vehicle = match[2].toLowerCase().trim();
-      return { type: 'start', pathName, vehicle };
-    }
-  }
-  
-  // Stop patrol
-  if (lower.includes('stop') && lower.includes('patrol')) {
-    const vehicleMatch = question.match(/(?:on|for)\s+(\w+(?:\s+\w+)*)/i);
-    if (vehicleMatch) {
-      const vehicle = vehicleMatch[1].toLowerCase().trim();
-      return { type: 'stop', vehicle };
-    }
-  }
-  
-  return null;
+  return lower.includes('list') && (lower.includes('mission') || lower.includes('path')) ||
+         lower.includes('start') && lower.includes('patrol') ||
+         lower.includes('stop') && lower.includes('patrol');
 }
 
 exports.handler = async (event) => {
@@ -133,21 +127,32 @@ exports.handler = async (event) => {
     const { question } = JSON.parse(event.body);
     
     // Check if it's a command
-    const command = parseCommand(question);
-    if (command) {
+    if (isCommand(question)) {
+      const command = await parseCommandWithLLM(question);
+      if (!command) {
+        return {
+          statusCode: 200,
+          headers,
+          body: JSON.stringify({
+            answer: `Sorry, I couldn't understand that command. Please try: "list mission files for [vehicle]", "start [path] on [vehicle]", or "stop patrol on [vehicle]".`,
+            sources: []
+          })
+        };
+      }
+      
       const vin = getVIN(command.vehicle);
       if (!vin) {
         return {
           statusCode: 200,
           headers,
           body: JSON.stringify({
-            answer: `Sorry, I don't recognize the vehicle "${command.vehicle}". Please use a valid nickname.`,
+            answer: `Sorry, I don't recognize the vehicle "${command.vehicle}". Please use a valid nickname like p12, black dragon, etc.`,
             sources: []
           })
         };
       }
       
-      if (command.type === 'list') {
+      if (command.intent === 'list') {
         const { pathNames } = await getMissionFiles(vin);
         const answer = `**Mission files for ${command.vehicle} (${vin}):**\n\n` + pathNames.map(name => `- ${name}`).join('\n');
         return {
@@ -155,15 +160,15 @@ exports.handler = async (event) => {
           headers,
           body: JSON.stringify({ answer, sources: [] })
         };
-      } else if (command.type === 'start') {
+      } else if (command.intent === 'start') {
         const { filenames, pathNames } = await getMissionFiles(vin);
-        const index = pathNames.findIndex(name => name.toLowerCase() === command.pathName.toLowerCase());
+        const index = pathNames.findIndex(name => name.toLowerCase() === command.path.toLowerCase());
         if (index === -1) {
           return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
-              answer: `Sorry, I couldn't find a mission file named "${command.pathName}" for ${command.vehicle}.`,
+              answer: `Sorry, I couldn't find a mission file named "${command.path}" for ${command.vehicle}. Available paths: ${pathNames.join(', ')}`,
               sources: []
             })
           };
@@ -173,11 +178,11 @@ exports.handler = async (event) => {
           statusCode: 200,
           headers,
           body: JSON.stringify({
-            answer: `Patrol started successfully for ${command.pathName} on ${command.vehicle} (${vin}).`,
+            answer: `Patrol started successfully for ${command.path} on ${command.vehicle} (${vin}).`,
             sources: []
           })
         };
-      } else if (command.type === 'stop') {
+      } else if (command.intent === 'stop') {
         await stopPatrol(vin);
         return {
           statusCode: 200,
