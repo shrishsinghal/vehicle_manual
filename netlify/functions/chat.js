@@ -105,7 +105,7 @@ async function parseCommandWithLLM(question) {
         model: 'llama-3.1-8b-instant',
         messages: [
           { role: 'system', 
-            content: 'You are a command parser for vehicle control. Extract the intent and parameters from the user query. Intents: list (list mission files), start (start patrol), stop (stop patrol), null (not a command). Parameters: vehicle (nickname), path (for start). Return only valid JSON: {"intent": "list|start|stop|null", "vehicle": "nickname or null", "path": "path name or null"}' },
+            content: 'You are a command parser for vehicle control. Analyze the user query and determine if it is a command to list mission files, start a patrol path, or stop patrol. Commands include: list/show mission files, saved paths, available paths; start patrol/path on vehicle; stop patrol on vehicle. If it is a command, extract: intent ("list", "start", "stop"), vehicle nickname (like p12, p15, black dragon), path name (for start, like JayGPS2). If not a command or unclear, set intent to "null". Return only valid JSON: {"intent": "list|start|stop|null", "vehicle": "nickname or null", "path": "path name or null"}' },
           { role: 'user', content: question }
         ]
       })
