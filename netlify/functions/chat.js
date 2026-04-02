@@ -40,44 +40,66 @@ function cosineSimilarity(a, b) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// Function to find the best matching path name from available paths
-async function findMatchingPath(requestedPath, availablePathNames) {
-  if (!requestedPath) return null;
+// Function to find the best matching path name from available paths using fuzzy matching
+function findMatchingPath(requestedPath, availablePathNames) {
+  if (!requestedPath || !availablePathNames || availablePathNames.length === 0) return null;
   
-  try {
-    const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', 
-            content: `You are a path matcher. Given a user-requested path and a list of available paths, find the best match.
-Available paths: ${JSON.stringify(availablePathNames)}
-
-Return ONLY a JSON object: {"matched_path": "path_name_or_null", "confidence": "high|medium|low"}
-
-Rules:
-- Match case-insensitively and handle variations (e.g., "jay gps 3" matches "JayGPS3")
-- Handle abbreviations and typos intelligently
-- If multiple matches are possible, pick the most likely one
-- If no reasonable match, return null for matched_path
-
-Return ONLY JSON, no markdown.` },
-          { role: 'user', content: `Find path matching: "${requestedPath}"` }
-        ]
-      })
-    });
-
-    const groqData = await groqResponse.json();
-    const content = groqData.choices[0].message.content.trim();
-    const jsonStr = content.replace(/^```json\s*/, '').replace(/\s*```$/, '').replace(/```$/, '').trim();
-    const result = JSON.parse(jsonStr);
-    return result.matched_path;
-  } catch (error) {
-    console.error('Path matching error:', error);
-    return null;
+  const req = requestedPath.toLowerCase().trim();
+  
+  // 1. Try exact match (case-insensitive)
+  for (const path of availablePathNames) {
+    if (path.toLowerCase() === req) {
+      return path;
+    }
   }
+  
+  // 2. Try partial match (requested is substring of path)
+  for (const path of availablePathNames) {
+    if (path.toLowerCase().includes(req)) {
+      return path;
+    }
+  }
+  
+  // 3. Try reverse partial (path name is substring of requested)
+  for (const path of availablePathNames) {
+    if (req.includes(path.toLowerCase())) {
+      return path;
+    }
+  }
+  
+  // 4. Try fuzzy scoring (character overlap and word matching)
+  const scored = availablePathNames.map(path => {
+    const pathLower = path.toLowerCase();
+    const reqParts = req.split(/\s+/);
+    const pathParts = pathLower.split(/[\s_-]+/);
+    
+    let score = 0;
+    
+    // Match individual characters
+    let matched = 0;
+    for (const char of req) {
+      if (pathLower.includes(char)) matched++;
+    }
+    score += matched * 2;
+    
+    // Match word parts
+    for (const reqPart of reqParts) {
+      for (const pathPart of pathParts) {
+        if (pathPart.includes(reqPart) || reqPart.includes(pathPart)) {
+          score += 10;
+        }
+      }
+    }
+    
+    return { path, score };
+  });
+  
+  const best = scored.sort((a, b) => b.score - a.score)[0];
+  if (best && best.score > 0) {
+    return best.path;
+  }
+  
+  return null;
 }
 
 // Function to extract path name from filename
@@ -331,7 +353,8 @@ exports.handler = async (event) => {
             const { pathNames, offline } = await getMissionFiles(
               vehicleInfo.VIN, 
               vehicleInfo.id, 
-              token
+              token,
+              vehicleInfo.workdriveFolder
             );
             
             const offlineNote = offline ? `\n\n**ℹ️ Note:** Vehicle is currently offline. These files are from Workdrive archive.` : '';
@@ -367,7 +390,8 @@ exports.handler = async (event) => {
             const { filenames, pathNames, offline } = await getMissionFiles(
               vehicleInfo.VIN,
               vehicleInfo.id,
-              token
+              token,
+              vehicleInfo.workdriveFolder
             );
             
             if (offline) {
@@ -381,8 +405,8 @@ exports.handler = async (event) => {
               };
             }
             
-            // Use LLM to find the best match
-            const matchedPath = await findMatchingPath(command.path, pathNames);
+            // Use fuzzy matching to find the best path
+            const matchedPath = findMatchingPath(command.path, pathNames);
             
             if (!matchedPath) {
               return {
