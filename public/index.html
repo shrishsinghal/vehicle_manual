@@ -8,19 +8,124 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1><span>Boson</span> Motors</h1>
+    <div id="loginModal" class="modal" style="display: flex;">
+        <div class="modal-content">
+            <h2>Boson Motors Assistant</h2>
+            <p>Please login to continue</p>
+            <div class="form-group">
+                <label>Email:</label>
+                <input type="email" id="emailInput" placeholder="your@email.com">
+            </div>
+            <div class="form-group">
+                <label>Password:</label>
+                <input type="password" id="passwordInput" placeholder="Password">
+            </div>
+            <div class="form-group" style="margin-top: 20px;">
+                <label>
+                    <input type="checkbox" id="rememberCheck"> Remember token for 7 days
+                </label>
+            </div>
+            <button id="loginBtn" class="modal-btn">Login</button>
+            <div id="loginError" style="color: #d32f2f; margin-top: 10px; display: none;"></div>
         </div>
-        <div id="chatArea" class="chat-area"></div>
-        <div class="input-area">
-            <input type="text" id="userInput" placeholder="Ask about the vehicle...">
-            <button id="voiceBtn" title="Voice Input">🎤</button>
-            <button id="sendBtn">SEND</button>
+    </div>
+
+    <div id="chatContainer" style="display: none; height: 100vh;">
+        <div class="container">
+            <div class="header">
+                <h1><span>Boson</span> Motors</h1>
+                <button id="logoutBtn" style="position: absolute; right: 20px; top: 20px; padding: 8px 16px; background: rgba(255,255,255,0.2); color: white; border: none; border-radius: 6px; cursor: pointer;">Logout</button>
+            </div>
+            <div id="chatArea" class="chat-area"></div>
+            <div class="input-area">
+                <input type="text" id="userInput" placeholder="Ask about the vehicle...">
+                <button id="voiceBtn" title="Voice Input">🎤</button>
+                <button id="sendBtn">SEND</button>
+            </div>
         </div>
     </div>
 
     <script>
+        let authToken = null;
+        let vehicleDetails = null;
+
+        function loadSavedToken() {
+            const saved = localStorage.getItem('bosonAuthToken');
+            const timestamp = localStorage.getItem('bosonAuthTimestamp');
+            if (saved && timestamp) {
+                const age = Date.now() - parseInt(timestamp);
+                const sevenDays = 7 * 24 * 60 * 60 * 1000;
+                if (age < sevenDays) {
+                    authToken = saved;
+                    vehicleDetails = JSON.parse(localStorage.getItem('bosonVehicleDetails'));
+                    return true;
+                } else {
+                    localStorage.clear();
+                }
+            }
+            return false;
+        }
+
+        if (!loadSavedToken()) {
+            document.getElementById('loginModal').style.display = 'flex';
+        } else {
+            showChat();
+        }
+
+        document.getElementById('loginBtn').addEventListener('click', async () => {
+            const email = document.getElementById('emailInput').value;
+            const password = document.getElementById('passwordInput').value;
+            const remember = document.getElementById('rememberCheck').checked;
+
+            if (!email || !password) {
+                showLoginError('Please enter email and password');
+                return;
+            }
+
+            try {
+                const response = await fetch('/.netlify/functions/auth', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, password })
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    showLoginError(data.error || 'Login failed');
+                    return;
+                }
+
+                authToken = data.token;
+                vehicleDetails = data.vehicleDetails;
+
+                if (remember) {
+                    localStorage.setItem('bosonAuthToken', authToken);
+                    localStorage.setItem('bosonAuthTimestamp', Date.now().toString());
+                    localStorage.setItem('bosonVehicleDetails', JSON.stringify(vehicleDetails));
+                }
+
+                showChat();
+            } catch (error) {
+                showLoginError('Network error: ' + error.message);
+            }
+        });
+
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            authToken = null;
+            vehicleDetails = null;
+            localStorage.clear();
+            location.reload();
+        });
+
+        function showLoginError(msg) {
+            document.getElementById('loginError').textContent = msg;
+            document.getElementById('loginError').style.display = 'block';
+        }
+
+        function showChat() {
+            document.getElementById('loginModal').style.display = 'none';
+            document.getElementById('chatContainer').style.display = 'block';
+        }
+
         const chatArea = document.getElementById('chatArea');
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
@@ -29,14 +134,11 @@
             const question = userInput.value.trim();
             if (!question || sendBtn.disabled) return;
 
-            // 1. Show User Message
             chatArea.innerHTML += `<div class="message user">${question}</div>`;
             userInput.value = '';
-            userInput.focus();
             
-            // 2. Show Loading
             const loadingId = 'loading-' + Date.now();
-            chatArea.innerHTML += `<div class="message assistant" id="${loadingId}">Searching manual...</div>`;
+            chatArea.innerHTML += `<div class="message assistant" id="${loadingId}">Searching...</div>`;
             chatArea.scrollTop = chatArea.scrollHeight;
             
             sendBtn.disabled = true;
@@ -44,13 +146,15 @@
             try {
                 const response = await fetch('/.netlify/functions/chat', {
                     method: 'POST',
-                    body: JSON.stringify({ question })
+                    body: JSON.stringify({ 
+                        question,
+                        token: authToken,
+                        vehicleDetails: vehicleDetails
+                    })
                 });
                 
                 const data = await response.json();
-                
-                // 3. Parse Markdown and Show Answer
-                const rawAnswer = data.answer || "I couldn't find an answer in the manual.";
+                const rawAnswer = data.answer || data.error || "Error processing request.";
                 const formattedAnswer = marked.parse(rawAnswer);
                 
                 let sourceText = '';
@@ -60,9 +164,8 @@
                 }
 
                 document.getElementById(loadingId).innerHTML = formattedAnswer + sourceText;
-                
             } catch (error) {
-                document.getElementById(loadingId).innerText = "System error. Please try again.";
+                document.getElementById(loadingId).innerText = "Error: " + error.message;
             } finally {
                 sendBtn.disabled = false;
                 chatArea.scrollTop = chatArea.scrollHeight;
@@ -74,16 +177,14 @@
             if (e.key === 'Enter') handleSend();
         });
 
-        // Voice Recognition Setup
+        // Voice Recognition
         const voiceBtn = document.getElementById('voiceBtn');
         let recognition = null;
         let isListening = false;
 
-        // Check if browser supports speech recognition
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             recognition = new SpeechRecognition();
-            
             recognition.continuous = false;
             recognition.interimResults = false;
             recognition.lang = 'en-US';
@@ -92,12 +193,10 @@
                 isListening = true;
                 voiceBtn.textContent = '🎙️';
                 voiceBtn.style.background = '#ff4444';
-                userInput.placeholder = 'Listening...';
             };
             
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                userInput.value = transcript;
+                userInput.value = event.results[0][0].transcript;
                 userInput.focus();
             };
             
@@ -105,44 +204,15 @@
                 isListening = false;
                 voiceBtn.textContent = '🎤';
                 voiceBtn.style.background = '';
-                userInput.placeholder = 'Ask about the vehicle...';
-            };
-            
-            recognition.onerror = (event) => {
-                console.error('Speech recognition error:', event.error);
-                isListening = false;
-                voiceBtn.textContent = '🎤';
-                voiceBtn.style.background = '';
-                userInput.placeholder = 'Ask about the vehicle...';
-                
-                if (event.error === 'not-allowed') {
-                    alert('Microphone access denied. Please allow microphone access and try again.');
-                } else {
-                    alert('Speech recognition error. Please try again.');
-                }
             };
         } else {
-            // Browser doesn't support speech recognition
             voiceBtn.style.display = 'none';
         }
 
-        // Voice button click handler
         voiceBtn.addEventListener('click', () => {
-            if (!recognition) {
-                alert('Speech recognition is not supported in this browser.');
-                return;
-            }
-            
-            if (isListening) {
-                recognition.stop();
-            } else {
-                try {
-                    recognition.start();
-                } catch (error) {
-                    console.error('Error starting recognition:', error);
-                    alert('Error starting voice recognition. Please try again.');
-                }
-            }
+            if (!recognition) return;
+            if (isListening) recognition.stop();
+            else recognition.start();
         });
     </script>
 </body>

@@ -86,42 +86,106 @@ function extractPathName(filename) {
   return filename.split('___')[0];
 }
 
-// Function to get mission files for a vehicle
-async function getMissionFiles(vin) {
-  const response = await fetch(`https://botcontrol.bosonmotors.com/api/getmissionFiles/${vin}`);
-  if (!response.ok) throw new Error(`Failed to fetch mission files: ${response.status}`);
-  const data = await response.json();
-  // data.data is a string like: "[PosixPath('/path/file1.json'), PosixPath('/path/file2.json')]"
-  const dataStr = data.data;
-  // Extract paths using regex
-  const pathMatches = dataStr.match(/PosixPath\('([^']+)'\)/g);
-  if (!pathMatches) throw new Error('Invalid mission files format');
-  const paths = pathMatches.map(match => match.match(/PosixPath\('([^']+)'\)/)[1]);
-  const filenames = paths.map(p => p.split('/').pop());
-  const pathNames = filenames.map(extractPathName);
-  return { filenames, pathNames };
+// Function to get mission files for a vehicle (with Workdrive fallback)
+async function getMissionFiles(vin, vehicleId, token, workdriveFolder) {
+  try {
+    // Try primary API with 2 second timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    
+    try {
+      const response = await fetch(`https://botcontrol.bosonmotors.com/api/getmissionFiles/${vin}`, {
+        headers: { 'Authorization': `${token}` },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        const dataStr = data.data;
+        const pathMatches = dataStr.match(/PosixPath\('([^']+)'\)/g);
+        if (!pathMatches) throw new Error('Invalid mission files format');
+        const paths = pathMatches.map(match => match.match(/PosixPath\('([^']+)'\)/)[1]);
+        const filenames = paths.map(p => p.split('/').pop());
+        const pathNames = filenames.map(extractPathName);
+        return { filenames, pathNames, offline: false };
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name !== 'AbortError') throw error;
+    }
+    
+    // Fallback to Workdrive if primary fails or times out
+    console.log('Primary API failed/timed out, using Workdrive fallback');
+    if (!workdriveFolder) {
+      throw new Error('Vehicle offline');
+    }
+    
+    const workdriveResponse = await fetch(
+      `https://botcontrol.bosonmotors.com/api/teamfolders50/${workdriveFolder}/files`,
+      { headers: { 'Authorization': `${token}` } }
+    );
+    
+    if (!workdriveResponse.ok) {
+      throw new Error('Failed to fetch from Workdrive');
+    }
+    
+    const workdriveData = await workdriveResponse.json();
+    const pathNames = workdriveData.files
+      ? workdriveData.files.slice(0, 50).map(f => extractPathName(f.name))
+      : [];
+    
+    return { filenames: workdriveData.files?.slice(0, 50).map(f => f.name) || [], pathNames, offline: true };
+    
+  } catch (error) {
+    console.error('Error fetching mission files:', error);
+    throw error;
+  }
 }
 
 // Function to start patrol
-async function startPatrol(vin, filename) {
-  const response = await fetch(`https://botcontrol.bosonmotors.com/api/startPatrol/${vin}/${filename}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}'
-  });
-  if (!response.ok) throw new Error(`Failed to start patrol: ${response.status}`);
-  return await response.json();
+async function startPatrol(vin, filename, token) {
+  try {
+    const response = await fetch(`https://botcontrol.bosonmotors.com/api/startPatrol/${vin}/${filename}`, {
+      method: 'POST',
+      headers: { 
+        'Authorization': `${token}`,
+        'Content-Type': 'application/json' 
+      },
+      body: '{}'
+    });
+    
+    if (response.status === 503 || response.status === 504) {
+      throw new Error('Vehicle is offline');
+    }
+    if (!response.ok) throw new Error(`Failed: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    throw error;
+  }
 }
 
 // Function to stop patrol
-async function stopPatrol(vin) {
-  const response = await fetch(`https://botcontrol.bosonmotors.com/api/stopPatrol/${vin}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}'
-  });
-  if (!response.ok) throw new Error(`Failed to stop patrol: ${response.status}`);
-  return await response.json();
+async function stopPatrol(vin, token) {
+  try {
+    const response = await fetch(`https://botcontrol.bosonmotors.com/api/stopPatrol/${vin}`, {
+      method: 'POST',
+      headers: { 
+        'Authorization': `${token}`,
+        'Content-Type': 'application/json' 
+      },
+      body: '{}'
+    });
+    
+    if (response.status === 503 || response.status === 504) {
+      throw new Error('Vehicle is offline');
+    }
+    if (!response.ok) throw new Error(`Failed: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    throw error;
+  }
 }
 
 // Function to parse command using LLM - comprehensive and robust
@@ -185,11 +249,30 @@ function isCommand(question) {
          lower.includes('mission') || lower.includes('path');
 }
 
+// Helper to get vehicle info from auth response
+function getVehicleInfo(vehicleLabel, vehicleDetails) {
+  if (!vehicleDetails || !Array.isArray(vehicleDetails)) return null;
+  const vehicle = vehicleDetails.find(v => 
+    v.label.toLowerCase() === vehicleLabel.toLowerCase() ||
+    v.CustNickName.toLowerCase() === vehicleLabel.toLowerCase() ||
+    v.VIN.toLowerCase() === vehicleLabel.toLowerCase()
+  );
+  return vehicle || null;
+}
+
 exports.handler = async (event) => {
   const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
   
   try {
-    const { question } = JSON.parse(event.body);
+    const { question, token, vehicleDetails } = JSON.parse(event.body);
+    
+    if (!token) {
+      return {
+        statusCode: 401,
+        headers,
+        body: JSON.stringify({ error: 'Authentication required. Please login first.' })
+      };
+    }
     
     // Check if it's a command
     if (isCommand(question)) {
@@ -197,15 +280,14 @@ exports.handler = async (event) => {
       if (!command || command.intent === 'null' || command.intent === null) {
         // Not a valid command, fall through to manual
       } else {
-        // Handle command - vehicle is already extracted by LLM
-        const vin = command.vehicle ? vehicleMapping[command.vehicle.toLowerCase()] : null;
-        
-        if (!vin) {
+        // Handle command using vehicle details from auth
+        const vehicleInfo = getVehicleInfo(command.vehicle, vehicleDetails);
+        if (!vehicleInfo) {
           return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
-              answer: `Sorry, I don't recognize the vehicle "${command.vehicle}". Known vehicles: ${Object.keys(vehicleMapping).join(', ')}`,
+              answer: `Vehicle "${command.vehicle}" not found. Authorized vehicles: ${vehicleDetails.map(v => v.label).join(', ')}`,
               sources: []
             })
           };
@@ -213,8 +295,14 @@ exports.handler = async (event) => {
         
         if (command.intent === 'list') {
           try {
-            const { pathNames } = await getMissionFiles(vin);
-            const answer = `**Mission files for ${command.vehicle} (${vin}):**\n\n` + pathNames.map(name => `- ${name}`).join('\n');
+            const { pathNames, offline } = await getMissionFiles(
+              vehicleInfo.VIN, 
+              vehicleInfo.id, 
+              token
+            );
+            
+            const offlineNote = offline ? `\n\n**ℹ️ Note:** Vehicle is currently offline. These files are from Workdrive archive.` : '';
+            const answer = `**Mission files for ${command.vehicle}:**\n\n` + pathNames.map(name => `- ${name}`).join('\n') + offlineNote;
             return {
               statusCode: 200,
               headers,
@@ -236,14 +324,30 @@ exports.handler = async (event) => {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `Please specify which path to start. Available paths can be listed with "list mission files for ${command.vehicle}".`,
+                answer: `Please specify which path to start. Example: "start JayGPS3 on ${command.vehicle}"`,
                 sources: []
               })
             };
           }
           
           try {
-            const { filenames, pathNames } = await getMissionFiles(vin);
+            const { filenames, pathNames, offline } = await getMissionFiles(
+              vehicleInfo.VIN,
+              vehicleInfo.id,
+              token
+            );
+            
+            if (offline) {
+              return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                  answer: `Cannot start patrol: Vehicle "${command.vehicle}" is offline. Please try when online.`,
+                  sources: []
+                })
+              };
+            }
+            
             // Use LLM to find the best match
             const matchedPath = await findMatchingPath(command.path, pathNames);
             
@@ -252,7 +356,7 @@ exports.handler = async (event) => {
                 statusCode: 200,
                 headers,
                 body: JSON.stringify({
-                  answer: `Sorry, I couldn't find a mission file named "${command.path}" for ${command.vehicle}. Available paths: ${pathNames.join(', ')}`,
+                  answer: `Sorry, I couldn't find a mission file named "${command.path}". Available: ${pathNames.join(', ')}`,
                   sources: []
                 })
               };
@@ -261,44 +365,46 @@ exports.handler = async (event) => {
             const pathIndex = pathNames.indexOf(matchedPath);
             const filename = filenames[pathIndex];
             
-            await startPatrol(vin, filename);
+            await startPatrol(vehicleInfo.VIN, filename, token);
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `Patrol started successfully for ${matchedPath} on ${command.vehicle} (${vin}).`,
+                answer: `✅ Patrol started successfully for ${matchedPath} on ${command.vehicle}.`,
                 sources: []
               })
             };
           } catch (error) {
+            const isOffline = error.message.includes('offline');
+            const answer = isOffline 
+              ? `Cannot start patrol: Vehicle "${command.vehicle}" is offline.`
+              : `Error: ${error.message}`;
             return {
               statusCode: 200,
               headers,
-              body: JSON.stringify({
-                answer: `Error starting patrol: ${error.message}`,
-                sources: []
-              })
+              body: JSON.stringify({ answer, sources: [] })
             };
           }
         } else if (command.intent === 'stop') {
           try {
-            await stopPatrol(vin);
+            await stopPatrol(vehicleInfo.VIN, token);
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `Patrol stopped successfully on ${command.vehicle} (${vin}).`,
+                answer: `✅ Patrol stopped successfully on ${command.vehicle}.`,
                 sources: []
               })
             };
           } catch (error) {
+            const isOffline = error.message.includes('offline');
+            const answer = isOffline 
+              ? `Cannot stop patrol: Vehicle "${command.vehicle}" is offline.`
+              : `Error: ${error.message}`;
             return {
               statusCode: 200,
               headers,
-              body: JSON.stringify({
-                answer: `Error stopping patrol: ${error.message}`,
-                sources: []
-              })
+              body: JSON.stringify({ answer, sources: [] })
             };
           }
         }
