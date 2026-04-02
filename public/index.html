@@ -34,7 +34,7 @@
         <div class="container">
             <div class="header">
                 <h1><span>Boson</span> Motors</h1>
-                <button id="logoutBtn" style="position: absolute; right: 20px; top: 20px; padding: 8px 16px; background: rgba(255,255,255,0.2); color: white; border: none; border-radius: 6px; cursor: pointer;">Logout</button>
+                    <button id="logoutBtn" class="logout-btn">Logout</button>
             </div>
             <div id="chatArea" class="chat-area"></div>
             <div class="input-area">
@@ -48,6 +48,8 @@
     <script>
         let authToken = null;
         let vehicleDetails = null;
+        let lastMissionFiles = [];
+        let lastMissionFilenames = [];
 
         function loadSavedToken() {
             const saved = localStorage.getItem('bosonAuthToken');
@@ -150,10 +152,18 @@
                         question,
                         token: authToken,
                         vehicleDetails: vehicleDetails
+                        ,lastMissionFiles: lastMissionFiles,
+                        lastMissionFilenames: lastMissionFilenames
                     })
                 });
                 
                 const data = await response.json();
+                if (data.missionFiles) {
+                    lastMissionFiles = data.missionFiles;
+                }
+                if (data.missionFilenames) {
+                    lastMissionFilenames = data.missionFilenames;
+                }
                 const rawAnswer = data.answer || data.error || "Error processing request.";
                 const formattedAnswer = marked.parse(rawAnswer);
                 
