@@ -41,10 +41,12 @@ body {
 .header {
     background: var(--bg-gradient);
     color: var(--boson-white);
-    padding: 28px 32px;
-    text-align: center;
+    padding: 18px 24px;
     border-bottom: 3px solid var(--boson-red);
-    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 70px;
 }
 
 .header::after {
@@ -69,6 +71,21 @@ body {
 .header h1 span { 
     color: var(--boson-red); 
     font-weight: 800;
+}
+
+.logout-btn {
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    border: 1px solid rgba(255,255,255,0.5);
+    border-radius: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.logout-btn:hover {
+    background: rgba(255, 255, 255, 0.35);
 }
 
 .chat-area {

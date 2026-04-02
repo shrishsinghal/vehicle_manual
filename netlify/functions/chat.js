@@ -108,6 +108,41 @@ function extractPathName(filename) {
   return filename.split('___')[0];
 }
 
+// Convert ordinal text (e.g., 6th, sixth, seven) to 1-based index. Returns null when invalid.
+function ordinalToIndex(text) {
+  if (!text) return null;
+  const cleaned = text.toString().trim().toLowerCase();
+  const digits = cleaned.match(/^(\d+)(?:st|nd|rd|th)?$/);
+  if (digits) {
+    const n = parseInt(digits[1], 10);
+    return Number.isNaN(n) ? null : n;
+  }
+
+  const map = {
+    'one': 1, 'first': 1,
+    'two': 2, 'second': 2,
+    'three': 3, 'third': 3,
+    'four': 4, 'fourth': 4,
+    'five': 5, 'fifth': 5,
+    'six': 6, 'sixth': 6,
+    'seven': 7, 'seventh': 7,
+    'eight': 8, 'eighth': 8,
+    'nine': 9, 'ninth': 9,
+    'ten': 10, 'tenth': 10,
+    'eleven': 11, 'eleventh': 11,
+    'twelve': 12, 'twelfth': 12,
+    'thirteen': 13, 'thirteenth': 13,
+    'fourteen': 14, 'fourteenth': 14,
+    'fifteen': 15, 'fifteenth': 15,
+    'sixteen': 16, 'sixteenth': 16,
+    'seventeen': 17, 'seventeenth': 17,
+    'eighteen': 18, 'eighteenth': 18,
+    'nineteen': 19, 'nineteenth': 19,
+    'twenty': 20, 'twentieth': 20
+  };
+  return map[cleaned] || null;
+}
+
 // Function to get mission files for a vehicle (with Workdrive fallback)
 async function getMissionFiles(vin, vehicleId, token, workdriveFolder) {
   try {
@@ -374,7 +409,7 @@ exports.handler = async (event) => {
         
         if (command.intent === 'list') {
           try {
-            const { pathNames, offline } = await getMissionFiles(
+            const { pathNames, filenames, offline } = await getMissionFiles(
               vehicleInfo.VIN, 
               vehicleInfo.id, 
               token,
@@ -386,7 +421,7 @@ exports.handler = async (event) => {
             return {
               statusCode: 200,
               headers,
-              body: JSON.stringify({ answer, sources: [] })
+              body: JSON.stringify({ answer, sources: [], missionFiles: pathNames, missionFilenames: filenames || [] })
             };
           } catch (error) {
             return {
@@ -429,8 +464,25 @@ exports.handler = async (event) => {
               };
             }
             
-            // Use fuzzy matching to find the best path
-            const matchedPath = findMatchingPath(command.path, pathNames);
+            // Try selecting by ordinal if user asked for an nth item
+            let matchedPath;
+            const ordinal = ordinalToIndex(command.path);
+            if (ordinal !== null) {
+              if (ordinal < 1 || ordinal > pathNames.length) {
+                return {
+                  statusCode: 200,
+                  headers,
+                  body: JSON.stringify({
+                    answer: `Invalid selection: ${command.path}. There are only ${pathNames.length} mission files.`,
+                    sources: []
+                  })
+                };
+              }
+              matchedPath = pathNames[ordinal - 1];
+            } else {
+              // Use fuzzy matching to find the best path
+              matchedPath = findMatchingPath(command.path, pathNames);
+            }
             
             if (!matchedPath) {
               return {
