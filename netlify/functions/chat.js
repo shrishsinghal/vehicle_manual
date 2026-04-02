@@ -114,15 +114,13 @@ async function getMissionFiles(vin, vehicleId, token, workdriveFolder) {
     // Try primary API with 2 second timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000);
-    
+    let primaryError = null;
     try {
       const response = await fetch(`https://botcontrol.bosonmotors.com/api/getmissionFiles/${vin}`, {
         headers: { 'Authorization': `${token}` },
         signal: controller.signal
       });
-      
       clearTimeout(timeoutId);
-      
       if (response.ok) {
         const data = await response.json();
         const dataStr = data.data;
@@ -131,37 +129,43 @@ async function getMissionFiles(vin, vehicleId, token, workdriveFolder) {
         const paths = pathMatches.map(match => match.match(/PosixPath\('([^']+)'\)/)[1]);
         const filenames = paths.map(p => p.split('/').pop());
         const pathNames = filenames.map(extractPathName);
+        console.log('[getMissionFiles] Primary API success:', {vin, filenames});
         return { filenames, pathNames, offline: false };
+      } else {
+        primaryError = `Primary API error: ${response.status}`;
       }
     } catch (error) {
       clearTimeout(timeoutId);
-      if (error.name !== 'AbortError') throw error;
+      primaryError = error;
+      if (error.name !== 'AbortError') {
+        console.error('[getMissionFiles] Primary API error:', error);
+      } else {
+        console.warn('[getMissionFiles] Primary API timed out');
+      }
     }
-    
     // Fallback to Workdrive if primary fails or times out
-    console.log('Primary API failed/timed out, using Workdrive fallback');
+    console.log('[getMissionFiles] Using Workdrive fallback', {vin, workdriveFolder, primaryError});
     if (!workdriveFolder) {
-      throw new Error('Vehicle offline');
+      console.error('[getMissionFiles] No workdriveFolder for vehicle', {vin, vehicleId});
+      throw new Error('Vehicle offline (no Workdrive folder)');
     }
-    
     const workdriveResponse = await fetch(
       `https://botcontrol.bosonmotors.com/api/teamfolders50/${workdriveFolder}/files`,
       { headers: { 'Authorization': `${token}` } }
     );
-    
     if (!workdriveResponse.ok) {
+      console.error('[getMissionFiles] Workdrive fetch failed', {status: workdriveResponse.status});
       throw new Error('Failed to fetch from Workdrive');
     }
-    
     const workdriveData = await workdriveResponse.json();
     const pathNames = workdriveData.files
       ? workdriveData.files.slice(0, 50).map(f => extractPathName(f.name))
       : [];
-    
-    return { filenames: workdriveData.files?.slice(0, 50).map(f => f.name) || [], pathNames, offline: true };
-    
+    const filenames = workdriveData.files?.slice(0, 50).map(f => f.name) || [];
+    console.log('[getMissionFiles] Workdrive fallback success', {vin, filenames});
+    return { filenames, pathNames, offline: true };
   } catch (error) {
-    console.error('Error fetching mission files:', error);
+    console.error('[getMissionFiles] Error fetching mission files:', error);
     throw error;
   }
 }
@@ -356,9 +360,9 @@ exports.handler = async (event) => {
               token,
               vehicleInfo.workdriveFolder
             );
-            
             const offlineNote = offline ? `\n\n**ℹ️ Note:** Vehicle is currently offline. These files are from Workdrive archive.` : '';
-            const answer = `**Mission files for ${command.vehicle}:**\n\n` + pathNames.map(name => `- ${name}`).join('\n') + offlineNote;
+            // Number the mission files
+            const answer = `**Mission files for ${command.vehicle}:**\n\n` + pathNames.map((name, idx) => `${idx+1}. ${name}`).join('\n') + offlineNote;
             return {
               statusCode: 200,
               headers,
