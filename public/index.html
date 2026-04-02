@@ -136,7 +136,9 @@
             const question = userInput.value.trim();
             if (!question || sendBtn.disabled) return;
 
-            chatArea.innerHTML += `<div class="message user">${question}</div>`;
+            const normalizedQuestion = question.replace(/\bpetrol\b/gi, 'patrol');
+
+            chatArea.innerHTML += `<div class="message user">${normalizedQuestion}</div>`;
             userInput.value = '';
             
             const loadingId = 'loading-' + Date.now();
@@ -149,7 +151,7 @@
                 const response = await fetch('/.netlify/functions/chat', {
                     method: 'POST',
                     body: JSON.stringify({ 
-                        question,
+                        question: normalizedQuestion,
                         token: authToken,
                         vehicleDetails: vehicleDetails
                         ,lastMissionFiles: lastMissionFiles,
@@ -206,7 +208,10 @@
             };
             
             recognition.onresult = (event) => {
-                userInput.value = event.results[0][0].transcript;
+                let transcript = event.results[0][0].transcript;
+                // Normalize common speech-recognition mistake where "patrol" is heard as "petrol"
+                transcript = transcript.replace(/\bpetrol\b/gi, 'patrol');
+                userInput.value = transcript;
                 userInput.focus();
             };
             
