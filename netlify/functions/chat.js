@@ -186,7 +186,17 @@ async function startPatrol(vin, filename, token) {
       throw new Error('Vehicle is offline');
     }
     if (!response.ok) throw new Error(`Failed: ${response.status}`);
-    return await response.json();
+    const text = await response.text();
+    try {
+      const json = JSON.parse(text);
+      if (json && typeof json === 'object') {
+        if (json.message) return json.message;
+        if (json.status) return json.status;
+      }
+      return JSON.stringify(json);
+    } catch (parseError) {
+      return text;
+    }
   } catch (error) {
     throw error;
   }
@@ -208,7 +218,17 @@ async function stopPatrol(vin, token) {
       throw new Error('Vehicle is offline');
     }
     if (!response.ok) throw new Error(`Failed: ${response.status}`);
-    return await response.json();
+    const text = await response.text();
+    try {
+      const json = JSON.parse(text);
+      if (json && typeof json === 'object') {
+        if (json.message) return json.message;
+        if (json.status) return json.status;
+      }
+      return JSON.stringify(json);
+    } catch (parseError) {
+      return text;
+    }
   } catch (error) {
     throw error;
   }
@@ -425,13 +445,12 @@ exports.handler = async (event) => {
             
             const pathIndex = pathNames.indexOf(matchedPath);
             const filename = filenames[pathIndex];
-            
-            await startPatrol(vehicleInfo.VIN, filename, token);
+            const startMessage = await startPatrol(vehicleInfo.VIN, filename, token);
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `✅ Patrol started successfully for ${matchedPath} on ${command.vehicle}.`,
+                answer: `✅ Patrol started for ${matchedPath} on ${command.vehicle}. ${startMessage ? `(${startMessage})` : ''}`,
                 sources: []
               })
             };
@@ -448,12 +467,12 @@ exports.handler = async (event) => {
           }
         } else if (command.intent === 'stop') {
           try {
-            await stopPatrol(vehicleInfo.VIN, token);
+            const stopMessage = await stopPatrol(vehicleInfo.VIN, token);
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({
-                answer: `✅ Patrol stopped successfully on ${command.vehicle}.`,
+                answer: `✅ Patrol stopped on ${command.vehicle}. ${stopMessage ? `(${stopMessage})` : ''}`,
                 sources: []
               })
             };
