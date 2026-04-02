@@ -200,25 +200,21 @@ async function parseCommandWithLLM(question) {
           { role: 'system', 
             content: `You are a command parser for vehicle control. Return ONLY a JSON object, nothing else.
 
-KNOWN VEHICLES (map any variation to the standard key):
-${Object.entries(vehicleMapping).map(([key, vin]) => `  - "${key}" (VIN: ${vin})`).join('\n')}
-
-TASK: Extract intent and parameters from user query.
+TASK: Extract intent, vehicle query, and path from user message.
 - intent: "list" (list mission files), "start" (start patrol), "stop" (stop patrol), or "null" (not a command)
-- vehicle: the vehicle nickname as key from the known vehicles list (standardized, e.g., "p12", "p15", "black dragon")
-- path: extracted path name for start commands (e.g., "JayGPS3", match to available paths case-insensitively)
+- vehicle: the vehicle name/nickname EXACTLY as user said it (don't normalize, just extract it)
+- path: extracted path name for start commands (just the path name, no extensions)
 
 RULES:
-1. Match vehicle nicknames intelligently (e.g., "p12 vehicle", "P12", "p-12" all map to "p12")
-2. For path names, extract just the name without file extensions or timestamps
-3. If vehicle or path cannot be matched, return null for that field
-4. Only return "start" intent if both vehicle AND path are provided
+1. Extract vehicle query EXACTLY as user stated - don't try to normalize
+2. For path, extract just the name part
+3. If vehicle or path cannot be extracted, return null
+4. Only "start" if both vehicle AND path provided
 
 EXAMPLES:
-- "list saved paths for p15" -> {"intent": "list", "vehicle": "p15", "path": null}
-- "show mission files on P15 VEHICLE" -> {"intent": "list", "vehicle": "p15", "path": null}
-- "start jaygps3 on p15" -> {"intent": "start", "vehicle": "p15", "path": "JayGPS3"}
-- "start JayGPS 3 on p-15 vehicle" -> {"intent": "start", "vehicle": "p15", "path": "JayGPS3"}
+- "list mission files for t8" -> {"intent": "list", "vehicle": "t8", "path": null}
+- "show paths on T8 VEHICLE" -> {"intent": "list", "vehicle": "T8 VEHICLE", "path": null}
+- "start jaygps3 on p15" -> {"intent": "start", "vehicle": "p15", "path": "jaygps3"}
 - "stop patrol on black dragon" -> {"intent": "stop", "vehicle": "black dragon", "path": null}
 - "how to start the vehicle" -> {"intent": null, "vehicle": null, "path": null}
 
@@ -252,12 +248,49 @@ function isCommand(question) {
 // Helper to get vehicle info from auth response
 function getVehicleInfo(vehicleLabel, vehicleDetails) {
   if (!vehicleDetails || !Array.isArray(vehicleDetails)) return null;
-  const vehicle = vehicleDetails.find(v => 
-    v.label.toLowerCase() === vehicleLabel.toLowerCase() ||
-    v.CustNickName.toLowerCase() === vehicleLabel.toLowerCase() ||
-    v.VIN.toLowerCase() === vehicleLabel.toLowerCase()
+  
+  const queryNorm = vehicleLabel.toLowerCase().trim();
+  
+  // Try exact match first
+  let vehicle = vehicleDetails.find(v => 
+    v.label.toLowerCase() === queryNorm ||
+    v.CustNickName.toLowerCase() === queryNorm ||
+    v.VIN.toLowerCase() === queryNorm
   );
-  return vehicle || null;
+  
+  if (vehicle) return vehicle;
+  
+  // Fuzzy matching: extract key parts
+  // "T8 Vehicle" -> ["t8", "vehicle"]
+  // "P12 Vehicle" -> ["p12", "vehicle"]
+  // "Black Dragon" -> ["black", "dragon"]
+  
+  const queryParts = queryNorm.split(/\s+|-/).filter(p => p.length > 0);
+  
+  // Score each vehicle
+  const scored = vehicleDetails.map(v => {
+    const labelParts = v.label.toLowerCase().split(/\s+/).filter(p => p.length > 0);
+    const nickParts = (v.CustNickName || '').toLowerCase().split(/\s+/).filter(p => p.length > 0);
+    const vinParts = v.VIN.toLowerCase().split(/\s+/).filter(p => p.length > 0);
+    
+    const allParts = [...labelParts, ...nickParts];
+    
+    // Count how many query parts match
+    let score = 0;
+    for (const qPart of queryParts) {
+      for (const vPart of allParts) {
+        if (vPart.includes(qPart) || qPart.includes(vPart)) {
+          score += 10;
+        }
+      }
+    }
+    
+    return { vehicle: v, score };
+  });
+  
+  // Get best match
+  const bestMatch = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score)[0];
+  return bestMatch ? bestMatch.vehicle : null;
 }
 
 exports.handler = async (event) => {
