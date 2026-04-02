@@ -390,6 +390,10 @@ button:disabled {
         padding: 12px 10px;
         font-size: 0.9rem;
     }
+    .input-area input:focus {
+        border-color: #d9d9d9 !important;
+        box-shadow: 0 0 0 1px rgba(227, 24, 55, 0.15) !important;
+    }
     .input-area button {
         padding: 12px 10px;
         font-size: 0.8rem;
