@@ -237,6 +237,81 @@ async function startPatrol(vin, filename, token) {
   }
 }
 
+// Function to get vehicle stats (battery, status, distance, hours, GPS, etc.)
+async function getVehicleStats(vin, isAutonomous, token) {
+  const auto = isAutonomous !== undefined ? isAutonomous : true;
+  const response = await fetch(
+    `https://botcontrol.bosonmotors.com/api/vehiclestatsmqtt/${vin}/${auto}`,
+    { headers: { 'Authorization': `${token}` } }
+  );
+  if (!response.ok) throw new Error(`Stats API error: ${response.status}`);
+  return response.json();
+}
+
+// Format vehicle stats into a readable markdown string
+function formatVehicleStats(statsData, vehicleName) {
+  const d = statsData.data || statsData;
+  const lines = [`**Status for ${vehicleName}:**\n`];
+
+  const online = d.OnlineStatus || 'Unknown';
+  const statusIcon = online === 'Online' ? '🟢' : '🔴';
+  lines.push(`- **Online Status:** ${statusIcon} ${online}`);
+
+  if (d.batterySOC !== undefined) lines.push(`- **Battery:** ${d.batterySOC}%`);
+  if (d.PlugState) lines.push(`- **Plug State:** ${d.PlugState}`);
+  if (d.VehicleMode) lines.push(`- **Mode:** ${d.VehicleMode}`);
+  if (d.DistanceTravelled !== undefined) lines.push(`- **Distance Travelled:** ${d.DistanceTravelled} km`);
+  if (d.AutonomousHours !== undefined) lines.push(`- **Autonomous Hours:** ${d.AutonomousHours} hrs`);
+  if (d.NonAutonomousHours !== undefined) lines.push(`- **Manual Hours:** ${d.NonAutonomousHours} hrs`);
+  if (d.latitude && d.longitude) lines.push(`- **Location:** ${d.latitude.toFixed(5)}, ${d.longitude.toFixed(5)}`);
+  if (d.VersionInfo) lines.push(`- **Firmware:** ${d.VersionInfo}`);
+  if (d.LastOnlineTime && online !== 'Online') {
+    lines.push(`- **Last Online:** ${new Date(d.LastOnlineTime).toLocaleString()}`);
+  }
+
+  return lines.join('\n');
+}
+
+// Pause or resume vehicle patrol
+async function pauseResume(vin, pause, token) {
+  const response = await fetch(
+    `https://botcontrol.bosonmotors.com/api/pauseandPlay/${vin}/${pause}`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `${token}`, 'Content-Type': 'application/json' },
+      body: '{}'
+    }
+  );
+  if (response.status === 503 || response.status === 504) throw new Error('Vehicle is offline');
+  if (!response.ok) throw new Error(`Pause/resume error: ${response.status}`);
+  const text = await response.text();
+  try { return JSON.parse(text); } catch { return { message: text }; }
+}
+
+// Get scheduled missions for a vehicle
+async function getScheduledMissions(vin, token) {
+  const response = await fetch(
+    `https://botcontrol.bosonmotors.com/api/getScheduleMission/${vin}`,
+    { headers: { 'Authorization': `${token}` } }
+  );
+  if (!response.ok) throw new Error(`Schedule API error: ${response.status}`);
+  return response.json();
+}
+
+// Create a support ticket
+async function createTicket(ticketData, token) {
+  const response = await fetch(
+    'https://botcontrol.bosonmotors.com/api/tickets',
+    {
+      method: 'POST',
+      headers: { 'Authorization': `${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(ticketData)
+    }
+  );
+  if (!response.ok) throw new Error(`Ticket API error: ${response.status}`);
+  return response.json();
+}
+
 // Function to stop patrol
 async function stopPatrol(vin, token) {
   try {
@@ -278,26 +353,51 @@ async function parseCommandWithLLM(question) {
       body: JSON.stringify({
         model: 'llama-3.1-8b-instant',
         messages: [
-          { role: 'system', 
-            content: `You are a command parser for vehicle control. Return ONLY a JSON object, nothing else.
+          { role: 'system',
+            content: `You are a command parser for a vehicle control assistant. Return ONLY a JSON object, nothing else.
 
-TASK: Extract intent, vehicle query, and path from user message.
-- intent: "list" (list mission files), "start" (start patrol), "stop" (stop patrol), or "null" (not a command)
-- vehicle: the vehicle name/nickname EXACTLY as user said it (don't normalize, just extract it)
-- path: extracted path name for start commands (just the path name, no extensions)
+TASK: Extract intent, vehicle, and any extra fields from the user message.
+
+INTENTS:
+- "list"     — list mission/path files on a vehicle
+- "start"    — start a patrol mission on a vehicle
+- "stop"     — stop the current patrol on a vehicle
+- "pause"    — pause the active patrol on a vehicle
+- "resume"   — resume a paused patrol on a vehicle
+- "status"   — get vehicle status (battery, online, location, distance, hours, charging)
+- "schedule" — list scheduled (timed/cron) missions for a vehicle
+- "ticket"   — create a support ticket for an issue with a vehicle
+- null       — not a vehicle command (e.g. a manual question)
+
+FIELDS:
+- vehicle: vehicle name/nickname EXACTLY as user said it (null if not mentioned)
+- path: path/mission name for "start" commands (null otherwise)
+- issue: short issue title for "ticket" commands (null otherwise)
+- desc: detailed description for "ticket" commands (null otherwise)
+- priority: "Low"|"Medium"|"High"|"Urgent" for ticket commands (default "Medium")
 
 RULES:
-1. Extract vehicle query EXACTLY as user stated - don't try to normalize
-2. For path, extract just the name part
-3. If vehicle or path cannot be extracted, return null
-4. Only "start" if both vehicle AND path provided
+1. Extract vehicle EXACTLY as user stated — do not normalize
+2. For "start", path is required; if missing return intent "start" with path null
+3. For "ticket", extract issue and desc from the user message
+4. Battery/online/location/charging/distance questions all use intent "status"
+5. "schedule" is for scheduled/timed/cron missions — NOT the same as "list" (live mission files)
+6. Return null intent for manual/how-to questions like "how do I start the vehicle?"
 
 EXAMPLES:
-- "list mission files for t8" -> {"intent": "list", "vehicle": "t8", "path": null}
-- "show paths on T8 VEHICLE" -> {"intent": "list", "vehicle": "T8 VEHICLE", "path": null}
-- "start jaygps3 on p15" -> {"intent": "start", "vehicle": "p15", "path": "jaygps3"}
-- "stop patrol on black dragon" -> {"intent": "stop", "vehicle": "black dragon", "path": null}
-- "how to start the vehicle" -> {"intent": null, "vehicle": null, "path": null}
+- "list mission files for t8"              -> {"intent":"list","vehicle":"t8","path":null,"issue":null,"desc":null,"priority":null}
+- "show paths on T8 VEHICLE"              -> {"intent":"list","vehicle":"T8 VEHICLE","path":null,"issue":null,"desc":null,"priority":null}
+- "start jaygps3 on p15"                  -> {"intent":"start","vehicle":"p15","path":"jaygps3","issue":null,"desc":null,"priority":null}
+- "stop patrol on black dragon"            -> {"intent":"stop","vehicle":"black dragon","path":null,"issue":null,"desc":null,"priority":null}
+- "pause p15"                              -> {"intent":"pause","vehicle":"p15","path":null,"issue":null,"desc":null,"priority":null}
+- "resume the patrol on t8"               -> {"intent":"resume","vehicle":"t8","path":null,"issue":null,"desc":null,"priority":null}
+- "what is the battery level of t8?"      -> {"intent":"status","vehicle":"t8","path":null,"issue":null,"desc":null,"priority":null}
+- "is p15 online?"                        -> {"intent":"status","vehicle":"p15","path":null,"issue":null,"desc":null,"priority":null}
+- "where is black dragon?"                -> {"intent":"status","vehicle":"black dragon","path":null,"issue":null,"desc":null,"priority":null}
+- "show scheduled missions for p15"       -> {"intent":"schedule","vehicle":"p15","path":null,"issue":null,"desc":null,"priority":null}
+- "create a ticket for t8 not connecting" -> {"intent":"ticket","vehicle":"t8","path":null,"issue":"Vehicle not connecting","desc":"Vehicle t8 is not connecting","priority":"High"}
+- "report issue: p15 blade not working"   -> {"intent":"ticket","vehicle":"p15","path":null,"issue":"Blade not working","desc":"Blade is not working on vehicle p15","priority":"Medium"}
+- "how to start the vehicle"              -> {"intent":null,"vehicle":null,"path":null,"issue":null,"desc":null,"priority":null}
 
 RETURN ONLY VALID JSON, NO MARKDOWN, NO EXTRA TEXT.` },
           { role: 'user', content: question }
@@ -321,9 +421,17 @@ RETURN ONLY VALID JSON, NO MARKDOWN, NO EXTRA TEXT.` },
 // Simple check: is this likely a command at all?
 function isCommand(question) {
   const lower = question.toLowerCase();
-  return lower.includes('list') || lower.includes('show') || 
-         lower.includes('start') || lower.includes('stop') || 
-         lower.includes('mission') || lower.includes('path');
+  return lower.includes('list') || lower.includes('show') ||
+         lower.includes('start') || lower.includes('stop') ||
+         lower.includes('mission') || lower.includes('path') ||
+         lower.includes('status') || lower.includes('battery') ||
+         lower.includes('online') || lower.includes('offline') ||
+         lower.includes('where is') || lower.includes('location') ||
+         lower.includes('charging') || lower.includes('distance') ||
+         lower.includes('pause') || lower.includes('resume') ||
+         lower.includes('schedule') || lower.includes('scheduled') ||
+         lower.includes('ticket') || lower.includes('report issue') ||
+         lower.includes('create ticket');
 }
 
 // Helper to get vehicle info from auth response
@@ -378,7 +486,7 @@ exports.handler = async (event) => {
   const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
   
   try {
-    const { question, token, vehicleDetails } = JSON.parse(event.body);
+    const { question, token, vehicleDetails, userEmail } = JSON.parse(event.body);
     
     if (!token) {
       return {
@@ -530,13 +638,132 @@ exports.handler = async (event) => {
             };
           } catch (error) {
             const isOffline = error.message.includes('offline');
-            const answer = isOffline 
+            const answer = isOffline
               ? `Cannot stop patrol: Vehicle "${command.vehicle}" is offline.`
               : `Error: ${error.message}`;
             return {
               statusCode: 200,
               headers,
               body: JSON.stringify({ answer, sources: [] })
+            };
+          }
+
+        } else if (command.intent === 'pause' || command.intent === 'resume') {
+          const isPause = command.intent === 'pause';
+          try {
+            const result = await pauseResume(vehicleInfo.VIN, isPause, token);
+            const msg = result.message || result.status || '';
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `${isPause ? '⏸️ Patrol paused' : '▶️ Patrol resumed'} on **${command.vehicle}**.${msg ? ` (${msg})` : ''}`,
+                sources: []
+              })
+            };
+          } catch (error) {
+            const isOffline = error.message.includes('offline');
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: isOffline
+                  ? `Cannot ${command.intent} patrol: Vehicle "${command.vehicle}" is offline.`
+                  : `Error: ${error.message}`,
+                sources: []
+              })
+            };
+          }
+
+        } else if (command.intent === 'status') {
+          try {
+            const isAutonomous = vehicleInfo.isAutonomous !== undefined ? vehicleInfo.isAutonomous : true;
+            const statsData = await getVehicleStats(vehicleInfo.VIN, isAutonomous, token);
+            const answer = formatVehicleStats(statsData, vehicleInfo.label || command.vehicle);
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({ answer, sources: [] })
+            };
+          } catch (error) {
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `Could not fetch status for "${command.vehicle}": ${error.message}`,
+                sources: []
+              })
+            };
+          }
+
+        } else if (command.intent === 'schedule') {
+          try {
+            const schedules = await getScheduledMissions(vehicleInfo.VIN, token);
+            if (!schedules || schedules.length === 0) {
+              return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                  answer: `No scheduled missions found for **${command.vehicle}**.`,
+                  sources: []
+                })
+              };
+            }
+            const lines = schedules.map((s, i) => {
+              const name = s.missionName || s.missionFile || `Mission ${i+1}`;
+              const cron = s.schedule ? ` — \`${s.schedule}\`` : '';
+              const lastRun = s.lastRun ? ` (last run: ${new Date(s.lastRun).toLocaleString()})` : '';
+              return `${i+1}. **${name}**${cron}${lastRun}`;
+            });
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `**Scheduled missions for ${command.vehicle}:**\n\n${lines.join('\n')}`,
+                sources: []
+              })
+            };
+          } catch (error) {
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `Could not fetch scheduled missions for "${command.vehicle}": ${error.message}`,
+                sources: []
+              })
+            };
+          }
+
+        } else if (command.intent === 'ticket') {
+          try {
+            const ticketPayload = {
+              email: userEmail || 'unknown@bosonmotors.com',
+              issue: command.issue || 'Issue reported via assistant',
+              desc: command.desc || `Issue reported for vehicle ${command.vehicle}`,
+              priority: command.priority || 'Medium',
+              drivetype: vehicleInfo.isAutonomous ? 'Autonomous' : 'Manual',
+              vehicleName: vehicleInfo.label || command.vehicle,
+              vehicleId: vehicleInfo.VIN,
+              vehicletype: 'Mower'
+            };
+            const result = await createTicket(ticketPayload, token);
+            const ticketId = result.ticketId || result.id || '';
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `🎫 Support ticket created${ticketId ? ` (#${ticketId})` : ''}.\n\n**Issue:** ${ticketPayload.issue}\n**Vehicle:** ${ticketPayload.vehicleName}\n**Priority:** ${ticketPayload.priority}\n\nOur support team will get back to you.`,
+                sources: []
+              })
+            };
+          } catch (error) {
+            return {
+              statusCode: 200,
+              headers,
+              body: JSON.stringify({
+                answer: `Could not create ticket: ${error.message}`,
+                sources: []
+              })
             };
           }
         }

@@ -48,6 +48,7 @@
     <script>
         let authToken = null;
         let vehicleDetails = null;
+        let userEmail = null;
         let lastMissionFiles = [];
         let lastMissionFilenames = [];
 
@@ -60,6 +61,7 @@
                 if (age < sevenDays) {
                     authToken = saved;
                     vehicleDetails = JSON.parse(localStorage.getItem('bosonVehicleDetails'));
+                    userEmail = localStorage.getItem('bosonUserEmail');
                     return true;
                 } else {
                     localStorage.clear();
@@ -98,11 +100,13 @@
 
                 authToken = data.token;
                 vehicleDetails = data.vehicleDetails;
+                userEmail = email;
 
                 if (remember) {
                     localStorage.setItem('bosonAuthToken', authToken);
                     localStorage.setItem('bosonAuthTimestamp', Date.now().toString());
                     localStorage.setItem('bosonVehicleDetails', JSON.stringify(vehicleDetails));
+                    localStorage.setItem('bosonUserEmail', email);
                 }
 
                 showChat();
@@ -150,11 +154,12 @@
             try {
                 const response = await fetch('/.netlify/functions/chat', {
                     method: 'POST',
-                    body: JSON.stringify({ 
+                    body: JSON.stringify({
                         question: normalizedQuestion,
                         token: authToken,
-                        vehicleDetails: vehicleDetails
-                        ,lastMissionFiles: lastMissionFiles,
+                        vehicleDetails: vehicleDetails,
+                        userEmail: userEmail,
+                        lastMissionFiles: lastMissionFiles,
                         lastMissionFilenames: lastMissionFilenames
                     })
                 });
